@@ -123,6 +123,53 @@ async function nextRequestToken() {
   return `BDR-${new Date().getFullYear()}-${String(count + 102).padStart(6, '0')}`;
 }
 
+
+// Donor eligibility: a donor can donate again on the same calendar day
+// three calendar months after the last donation (for example, Jan 20 -> Apr 20).
+function parseDateOnly(value) {
+  if (typeof value !== 'string' || value === 'None' || value.trim() === '') return null;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return null;
+  const [year, month, day] = value.split('-').map(Number);
+  const date = new Date(year, month - 1, day);
+  if (
+    date.getFullYear() !== year ||
+    date.getMonth() !== month - 1 ||
+    date.getDate() !== day
+  ) return null;
+  return date;
+}
+
+function getDonorEligibleOn(lastDonationDate) {
+  const lastDonation = parseDateOnly(lastDonationDate);
+  if (!lastDonation) return null;
+
+  const target = new Date(lastDonation.getFullYear(), lastDonation.getMonth() + 3, 1);
+  const lastDayOfTargetMonth = new Date(
+    target.getFullYear(),
+    target.getMonth() + 1,
+    0
+  ).getDate();
+
+  return new Date(
+    target.getFullYear(),
+    target.getMonth(),
+    Math.min(lastDonation.getDate(), lastDayOfTargetMonth)
+  );
+}
+
+function isDonorEligible(donor, asOf = new Date()) {
+  const eligibleOn = getDonorEligibleOn(donor?.lastDonationDate);
+  if (!eligibleOn) return true;
+  return asOf >= eligibleOn;
+}
+
+function formatDateOnly(date) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
 function generatedPassword(role) {
   const prefix = role === 'hospital' ? 'hosp' : role === 'bloodbank' ? 'bb' : 'donor';
   return `${prefix}_${Math.floor(100 + Math.random() * 900)}`;
@@ -218,6 +265,15 @@ app.post('/api/users/register', async (req, res) => {
       base.address = formData.address || `${formData.location} Central Hub`;
     }
     if (role === 'donor') {
+      if (formData.lastDonationDate) {
+        const lastDonation = parseDateOnly(formData.lastDonationDate);
+        if (!lastDonation || lastDonation > new Date()) {
+          return res.status(400).json({
+            error: 'Enter a valid last donation date that is not in the future.'
+          });
+        }
+      }
+
       Object.assign(base, {
         bloodGroup: formData.bloodGroup,
         age: Number(formData.age),
@@ -323,6 +379,8 @@ app.post('/api/requests', async (req, res) => {
       bloodGroup: new RegExp(`^${String(bloodGroup).trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i'),
       location: new RegExp(`^${String(hospitalLocation).trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i')
     }).lean();
+    const requestCreatedAt = new Date();
+    const eligibleMatchingDonors = matchingDonors.filter((donor) => isDonorEligible(donor, requestCreatedAt));
 
     const newRequest = await BloodRequest.create({
       id: `REQ-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
@@ -341,15 +399,15 @@ app.post('/api/requests', async (req, res) => {
       reason: requestData.reason || '',
       instructions: requestData.instructions || '',
       status: 'Pending',
-      createdAt: new Date().toISOString(),
-      matchedDonorsCount: matchingDonors.length
+      createdAt: requestCreatedAt.toISOString(),
+      matchedDonorsCount: eligibleMatchingDonors.length
     });
 
     await logActivity(
       `Blood Request Token generated: ${token} (${newRequest.bloodGroup} at ${newRequest.hospitalLocation})`,
       newRequest.hospitalName, 'Hospital', newRequest.urgency
     );
-    res.status(201).json({ success: true, request: newRequest, matchingDonorsCount: matchingDonors.length });
+    res.status(201).json({ success: true, request: newRequest, matchingDonorsCount: eligibleMatchingDonors.length });
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: 'Could not create blood request.' });
@@ -382,6 +440,16 @@ app.post('/api/responses', async (req, res) => {
       User.findOne({ id: donorId })
     ]);
     if (!request || !donor) return res.status(404).json({ error: 'Request or donor not found.' });
+
+    if (responseStatus === 'Accepted' && !isDonorEligible(donor)) {
+      const eligibleOn = getDonorEligibleOn(donor.lastDonationDate);
+      return res.status(409).json({
+        success: false,
+        error: eligibleOn
+          ? `You are not eligible to donate blood until ${formatDateOnly(eligibleOn)}.`
+          : 'You are not currently eligible to donate blood.'
+      });
+    }
 
     const now = new Date();
     const responseTime = `${now.toISOString().split('T')[0]} ${now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;
