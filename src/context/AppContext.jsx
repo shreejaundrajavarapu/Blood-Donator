@@ -1,7 +1,7 @@
 import React, { createContext, useContext, useEffect, useState } from 'react';
 
 const AppContext = createContext();
-const API_URL = 'http://localhost:4000/api';
+const API_URL = 'https://blood-connecter.onrender.com/api';
 
 const INITIAL_USERS = [];
 const INITIAL_REQUESTS = [];
