@@ -1,12 +1,51 @@
 import React, { createContext, useContext, useEffect, useState } from 'react';
 
 const AppContext = createContext();
-const API_URL = 'https://blood-connecter.onrender.com/api';
+const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:4000/api';
 
 const INITIAL_USERS = [];
 const INITIAL_REQUESTS = [];
 const INITIAL_RESPONSES = [];
 const INITIAL_ACTIVITIES = [];
+
+// Donor eligibility: a donor can donate again on the same calendar day
+// three calendar months after the last donation (for example, Jan 20 -> Apr 20).
+function parseDateOnly(value) {
+  if (typeof value !== 'string' || value === 'None' || value.trim() === '') return null;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return null;
+  const [year, month, day] = value.split('-').map(Number);
+  const date = new Date(year, month - 1, day);
+  if (
+    date.getFullYear() !== year ||
+    date.getMonth() !== month - 1 ||
+    date.getDate() !== day
+  ) return null;
+  return date;
+}
+
+function getDonorEligibleOn(lastDonationDate) {
+  const lastDonation = parseDateOnly(lastDonationDate);
+  if (!lastDonation) return null;
+
+  const target = new Date(lastDonation.getFullYear(), lastDonation.getMonth() + 3, 1);
+  const lastDayOfTargetMonth = new Date(
+    target.getFullYear(),
+    target.getMonth() + 1,
+    0
+  ).getDate();
+
+  return new Date(
+    target.getFullYear(),
+    target.getMonth(),
+    Math.min(lastDonation.getDate(), lastDayOfTargetMonth)
+  );
+}
+
+function isDonorEligible(donor, asOf = new Date()) {
+  const eligibleOn = getDonorEligibleOn(donor?.lastDonationDate);
+  if (!eligibleOn) return true; // blank/None means first-time donor
+  return asOf >= eligibleOn;
+}
 
 async function api(path, options = {}) {
   const response = await fetch(`${API_URL}${path}`, {
@@ -132,6 +171,8 @@ export function AppProvider({ children }) {
 
   const registerHospital = (formData) => register('hospital', formData);
   const registerBloodBank = (formData) => register('bloodbank', formData);
+  // Registration is never blocked by the 3-month rule. The last donation date
+  // is only stored so eligibility can be checked later when responding to a request.
   const registerDonor = (formData) => register('donor', formData);
 
   const sendApprovalEmail = async ({ name, role, email, uniqueId, password }) => {
@@ -208,6 +249,21 @@ export function AppProvider({ children }) {
   };
 
   const respondToRequest = async (requestId, donorId, responseStatus) => {
+    // Eligibility is checked only when a donor accepts a request, never during registration.
+    if (responseStatus === 'Accepted') {
+      const donor = users.find((u) => u.id === donorId);
+      if (donor && !isDonorEligible(donor)) {
+        const eligibleOn = getDonorEligibleOn(donor.lastDonationDate);
+        const eligibleDate = eligibleOn ? eligibleOn.toLocaleDateString() : 'a later date';
+        addToast(
+          `You are not yet eligible to donate blood. You can donate again from ${eligibleDate}.`,
+          'warning',
+          7000
+        );
+        return null;
+      }
+    }
+
     try {
       const result = await api('/responses', {
         method: 'POST', body: JSON.stringify({ requestId, donorId, responseStatus })
