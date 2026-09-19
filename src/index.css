@@ -149,6 +149,12 @@ h1, h2, h3, h4, h5, h6 {
   border: 1px solid #fde68a;
 }
 
+.badge-critical {
+  background-color: var(--urgent-bg);
+  color: var(--urgent);
+  border: 1px solid #fde68a;
+}
+
 .badge-normal {
   background-color: var(--normal-bg);
   color: var(--normal);

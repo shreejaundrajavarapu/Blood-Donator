@@ -12,6 +12,25 @@ const PORT = Number(process.env.PORT || 4000);
 const MONGODB_URI = process.env.MONGODB_URI;
 const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:5173';
 
+const REQUEST_PRIORITIES = ['Emergency', 'Critical', 'Normal'];
+const REQUEST_PRIORITY_RANK = Object.freeze({ Emergency: 0, Critical: 1, Normal: 2 });
+
+function normalizeRequestPriority(value) {
+  const normalized = String(value || 'Normal').trim();
+  if (!normalized) return 'Normal';
+  if (normalized === 'Urgent') return 'Critical';
+  return normalized;
+}
+
+function isValidRequestPriority(value) {
+  return REQUEST_PRIORITIES.includes(value);
+}
+
+function sanitizeRequestPriority(value) {
+  const normalized = normalizeRequestPriority(value);
+  return isValidRequestPriority(normalized) ? normalized : 'Normal';
+}
+
 app.use(cors({ origin: FRONTEND_URL }));
 app.use(express.json());
 
@@ -51,7 +70,7 @@ const requestSchema = new mongoose.Schema({
   requiredDate: String,
   requiredTime: String,
   donationLocation: String,
-  urgency: String,
+  urgency: { type: String, enum: REQUEST_PRIORITIES, default: 'Normal' },
   reason: String,
   instructions: String,
   status: String,
@@ -188,7 +207,11 @@ app.get('/api/state', async (req, res) => {
       Response.find().sort({ createdAt: -1 }).lean(),
       Activity.find().sort({ createdAt: -1 }).lean()
     ]);
-    res.json({ users: users.map(publicUser), requests, responses, activities });
+    const normalizedRequests = requests.map((request) => {
+      const urgency = sanitizeRequestPriority(request.urgency);
+      return { ...request, urgency, priorityRank: REQUEST_PRIORITY_RANK[urgency] };
+    });
+    res.json({ users: users.map(publicUser), requests: normalizedRequests, responses, activities });
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: 'Could not load application data.' });
@@ -373,6 +396,10 @@ app.post('/api/requests', async (req, res) => {
     const token = await nextRequestToken();
     const hospitalLocation = currentUser?.location || requestData.hospitalLocation || 'Specified Location';
     const bloodGroup = requestData.bloodGroup;
+    const urgency = normalizeRequestPriority(requestData.urgency);
+    if (!isValidRequestPriority(urgency)) {
+      return res.status(400).json({ error: 'Priority must be Emergency, Critical, or Normal.' });
+    }
 
     const matchingDonors = await User.find({
       role: 'donor', status: 'Approved', availability: 'Available',
@@ -395,7 +422,7 @@ app.post('/api/requests', async (req, res) => {
       requiredDate: requestData.requiredDate,
       requiredTime: requestData.requiredTime,
       donationLocation: requestData.donationLocation,
-      urgency: requestData.urgency || 'Normal',
+      urgency,
       reason: requestData.reason || '',
       instructions: requestData.instructions || '',
       status: 'Pending',
@@ -428,6 +455,25 @@ async function updateRequestStatus(req, res, status) {
     res.status(500).json({ error: 'Could not update blood request.' });
   }
 }
+app.patch('/api/requests/:requestId/priority', async (req, res) => {
+  try {
+    const urgency = normalizeRequestPriority(req.body?.urgency);
+    if (!isValidRequestPriority(urgency)) {
+      return res.status(400).json({ error: 'Priority must be Emergency, Critical, or Normal.' });
+    }
+
+    const request = await BloodRequest.findOne({ id: req.params.requestId });
+    if (!request) return res.status(404).json({ error: 'Request not found.' });
+
+    request.urgency = urgency;
+    await request.save();
+    await logActivity(`Request ${request.token} priority changed to ${urgency}`, request.hospitalName, 'Hospital', urgency);
+    res.json({ success: true, request });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'Could not update request priority.' });
+  }
+});
 app.post('/api/requests/:requestId/complete', (req, res) => updateRequestStatus(req, res, 'Completed'));
 app.post('/api/requests/:requestId/cancel', (req, res) => updateRequestStatus(req, res, 'Cancelled'));
 
@@ -547,6 +593,11 @@ async function start() {
 
   await mongoose.connect(MONGODB_URI);
   console.log(`✅ MongoDB connected: ${mongoose.connection.host}`);
+
+  const migration = await BloodRequest.updateMany({ urgency: 'Urgent' }, { $set: { urgency: 'Critical' } });
+  if (migration.modifiedCount > 0) {
+    console.log(`✅ Normalized ${migration.modifiedCount} existing request(s): Urgent → Critical`);
+  }
 
   const admin = await User.findOne({ id: 'ADMIN-001' });
   if (!admin) {
