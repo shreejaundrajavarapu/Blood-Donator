@@ -82,7 +82,7 @@ export default function AuthModal() {
 
   if (!authModal && !generatedCredentialsModal) return null;
 
-  const handleLoginSubmit = (e) => {
+  const handleLoginSubmit = async (e) => {
     e.preventDefault();
     setLoginError('');
     if (!loginId.trim() || !password.trim()) {
@@ -90,13 +90,13 @@ export default function AuthModal() {
       return;
     }
 
-    const res = login(selectedRole, loginId, password);
+    const res = await login(selectedRole, loginId, password);
     if (!res.success) {
       setLoginError(res.message || 'Login failed.');
     }
   };
 
-  const handleHospitalSubmit = (e) => {
+  const handleHospitalSubmit = async (e) => {
     e.preventDefault();
     if (!hospitalForm.name || !hospitalForm.contact || !hospitalForm.email || !hospitalForm.licenseNumber) {
       alert('Please fill out all required hospital details.');
@@ -106,11 +106,11 @@ export default function AuthModal() {
       setHospitalPhoneError('Enter a valid 10-digit Indian mobile number starting with 6, 7, 8, or 9.');
       return;
     }
-    registerHospital(hospitalForm);
-    setRegistrationSubmitted(true);
+    const result = await registerHospital(hospitalForm);
+    if (result) setRegistrationSubmitted(true);
   };
 
-  const handleBloodBankSubmit = (e) => {
+  const handleBloodBankSubmit = async (e) => {
     e.preventDefault();
     if (!bloodBankForm.name || !bloodBankForm.contact || !bloodBankForm.email || !bloodBankForm.licenseNumber) {
       alert('Please fill out all required blood bank details.');
@@ -120,11 +120,11 @@ export default function AuthModal() {
       setBloodBankPhoneError('Enter a valid 10-digit Indian mobile number starting with 6, 7, 8, or 9.');
       return;
     }
-    registerBloodBank(bloodBankForm);
-    setRegistrationSubmitted(true);
+    const result = await registerBloodBank(bloodBankForm);
+    if (result) setRegistrationSubmitted(true);
   };
 
-  const handleDonorSubmit = (e) => {
+  const handleDonorSubmit = async (e) => {
     e.preventDefault();
     if (!donorForm.name || !donorForm.phone || !donorForm.location || !donorForm.bloodGroup) {
       alert('Please fill out all required donor details.');
@@ -134,8 +134,8 @@ export default function AuthModal() {
       setDonorPhoneError('Enter a valid 10-digit Indian mobile number starting with 6, 7, 8, or 9.');
       return;
     }
-    registerDonor(donorForm);
-    setRegistrationSubmitted(true);
+    const result = await registerDonor(donorForm);
+    if (result) setRegistrationSubmitted(true);
   };
 
   // Render Simulated Generated Credentials Modal (Step 4 & 5 demo helper)

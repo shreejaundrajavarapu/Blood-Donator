@@ -13,7 +13,7 @@ import AdminDashboard from './components/admin/AdminDashboard';
 import { ShieldAlert, LogOut, Home, Clock } from 'lucide-react';
 
 function AppContent() {
-  const { currentUser, currentView, setCurrentView, logout } = useApp();
+  const { currentUser, currentView, setCurrentView, logout, dataLoaded } = useApp();
 
   // If viewing landing page or no user logged in
   if (currentView === 'landing' || !currentUser) {
