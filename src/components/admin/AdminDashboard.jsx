@@ -832,8 +832,8 @@ export default function AdminDashboard() {
                             className={`badge ${
                               req.urgency === 'Emergency'
                                 ? 'badge-emergency pulse-emergency'
-                                : req.urgency === 'Urgent'
-                                ? 'badge-urgent'
+                                : req.urgency === 'Critical'
+                                ? 'badge-critical'
                                 : 'badge-normal'
                             }`}
                           >

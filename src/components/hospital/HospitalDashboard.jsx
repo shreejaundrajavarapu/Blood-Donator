@@ -402,8 +402,8 @@ export default function HospitalDashboard() {
                               className={`badge ${
                                 req.urgency === 'Emergency'
                                   ? 'badge-emergency pulse-emergency'
-                                  : req.urgency === 'Urgent'
-                                  ? 'badge-urgent'
+                                  : req.urgency === 'Critical'
+                                  ? 'badge-critical'
                                   : 'badge-normal'
                               }`}
                             >
@@ -648,8 +648,8 @@ export default function HospitalDashboard() {
 
                       <label
                         style={{
-                          border: `2px solid ${requestForm.urgency === 'Urgent' ? 'var(--urgent)' : 'var(--border-light)'}`,
-                          background: requestForm.urgency === 'Urgent' ? 'var(--urgent-bg)' : 'white',
+                          border: `2px solid ${requestForm.urgency === 'Critical' ? 'var(--urgent)' : 'var(--border-light)'}`,
+                          background: requestForm.urgency === 'Critical' ? 'var(--urgent-bg)' : 'white',
                           borderRadius: '8px',
                           padding: '12px',
                           cursor: 'pointer',
@@ -659,12 +659,12 @@ export default function HospitalDashboard() {
                         <input
                           type="radio"
                           name="urgency"
-                          value="Urgent"
-                          checked={requestForm.urgency === 'Urgent'}
-                          onChange={() => setRequestForm({ ...requestForm, urgency: 'Urgent' })}
+                          value="Critical"
+                          checked={requestForm.urgency === 'Critical'}
+                          onChange={() => setRequestForm({ ...requestForm, urgency: 'Critical' })}
                           style={{ display: 'none' }}
                         />
-                        <div style={{ fontWeight: 700, color: 'var(--urgent)', fontSize: '0.9rem' }}>Urgent</div>
+                        <div style={{ fontWeight: 700, color: 'var(--urgent)', fontSize: '0.9rem' }}>Critical</div>
                         <div style={{ fontSize: '0.72rem', color: 'var(--text-secondary)' }}>Within 6-12 hours</div>
                       </label>
 
@@ -760,7 +760,7 @@ export default function HospitalDashboard() {
                   >
                     <option value="ALL">All Urgencies</option>
                     <option value="Emergency">Emergency</option>
-                    <option value="Urgent">Urgent</option>
+                    <option value="Critical">Critical</option>
                     <option value="Normal">Normal</option>
                   </select>
 
@@ -835,8 +835,8 @@ export default function HospitalDashboard() {
                                 className={`badge ${
                                   req.urgency === 'Emergency'
                                     ? 'badge-emergency pulse-emergency'
-                                    : req.urgency === 'Urgent'
-                                    ? 'badge-urgent'
+                                    : req.urgency === 'Critical'
+                                    ? 'badge-critical'
                                     : 'badge-normal'
                                 }`}
                               >
@@ -982,7 +982,7 @@ export default function HospitalDashboard() {
                           className={`badge ${
                             selectedRequestForResponses.urgency === 'Emergency'
                               ? 'badge-emergency pulse-emergency'
-                              : 'badge-urgent'
+                              : 'badge-critical'
                           }`}
                         >
                           {selectedRequestForResponses.urgency}

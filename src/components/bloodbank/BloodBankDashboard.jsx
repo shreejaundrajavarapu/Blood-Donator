@@ -287,7 +287,7 @@ export default function BloodBankDashboard() {
                               className={`badge ${
                                 req.urgency === 'Emergency'
                                   ? 'badge-emergency pulse-emergency'
-                                  : 'badge-urgent'
+                                  : 'badge-critical'
                               }`}
                             >
                               {req.urgency}

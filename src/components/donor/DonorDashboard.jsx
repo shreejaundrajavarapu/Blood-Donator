@@ -45,16 +45,30 @@ export default function DonorDashboard() {
     lastDonationDate: currentUser?.lastDonationDate || ''
   });
 
-  // Filter requests that match this donor:
-  // 1. Blood Group matching
-  // 2. Location matching
-  const matchingRequests = requests.filter(
-    (req) =>
-      req.bloodGroup.trim().toLowerCase() === currentUser?.bloodGroup?.trim().toLowerCase() &&
-      req.hospitalLocation.trim().toLowerCase() === currentUser?.location?.trim().toLowerCase() &&
-      req.status !== 'Completed' &&
-      req.status !== 'Cancelled'
+  const PRIORITY_RANK = { Emergency: 0, Critical: 1, Normal: 2 };
+
+  const normalizePriority = (priority) => (
+    priority === 'Urgent' ? 'Critical' : PRIORITY_RANK[priority] !== undefined ? priority : 'Normal'
   );
+
+  // Only approved, available donors see matching requests; matching requests are priority-sorted.
+  const matchingRequests =
+    currentUser?.status === 'Approved' && currentUser?.availability === 'Available'
+      ? requests
+          .filter(
+            (req) =>
+              req.bloodGroup?.trim().toLowerCase() === currentUser?.bloodGroup?.trim().toLowerCase() &&
+              req.hospitalLocation?.trim().toLowerCase() === currentUser?.location?.trim().toLowerCase() &&
+              req.status !== 'Completed' &&
+              req.status !== 'Cancelled'
+          )
+          .sort((a, b) => {
+            const priorityA = PRIORITY_RANK[normalizePriority(a.urgency)];
+            const priorityB = PRIORITY_RANK[normalizePriority(b.urgency)];
+            if (priorityA !== priorityB) return priorityA - priorityB;
+            return new Date(b.createdAt || 0) - new Date(a.createdAt || 0);
+          })
+      : [];
 
   // My responses
   const myResponses = responses.filter((res) => res.donorId === currentUser?.id);
@@ -380,7 +394,7 @@ export default function DonorDashboard() {
                                   className={`badge ${
                                     req.urgency === 'Emergency'
                                       ? 'badge-emergency pulse-emergency'
-                                      : 'badge-urgent'
+                                      : 'badge-critical'
                                   }`}
                                 >
                                   {req.urgency}
@@ -552,7 +566,7 @@ export default function DonorDashboard() {
                                 className={`badge ${
                                   req.urgency === 'Emergency'
                                     ? 'badge-emergency pulse-emergency'
-                                    : 'badge-urgent'
+                                    : 'badge-critical'
                                 }`}
                               >
                                 {req.urgency}

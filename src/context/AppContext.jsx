@@ -88,7 +88,7 @@ export function AppProvider({ children }) {
 
   const removeToast = (id) => setToasts((prev) => prev.filter((t) => t.id !== id));
 
-  const refreshData = async () => {
+  const refreshData = async ({ silent = false } = {}) => {
     try {
       const data = await api('/state');
       setUsers(data.users || []);
@@ -99,7 +99,9 @@ export function AppProvider({ children }) {
       return data;
     } catch (error) {
       console.error('[BloodConnect] Could not load database:', error);
-      addToast('Could not connect to the database. Make sure the backend is running.', 'error', 7000);
+      if (!silent) {
+        addToast('Could not connect to the database. Make sure the backend is running.', 'error', 7000);
+      }
       return null;
     }
   };
@@ -107,6 +109,15 @@ export function AppProvider({ children }) {
   useEffect(() => {
     refreshData();
   }, []);
+
+  // Keep donor requests synchronized with changes made in other browser sessions.
+  useEffect(() => {
+    if (currentUser?.role !== 'donor') return undefined;
+    const intervalId = setInterval(() => {
+      refreshData({ silent: true });
+    }, 5000);
+    return () => clearInterval(intervalId);
+  }, [currentUser?.id, currentUser?.role]);
 
   useEffect(() => {
     if (currentUser) sessionStorage.setItem('bloodconnect_currentUser', JSON.stringify(currentUser));
@@ -275,6 +286,21 @@ export function AppProvider({ children }) {
     } catch (error) { addToast(error.message, 'error'); return null; }
   };
 
+  const updateBloodRequestPriority = async (requestId, urgency) => {
+    try {
+      const result = await api(`/requests/${encodeURIComponent(requestId)}/priority`, {
+        method: 'PATCH',
+        body: JSON.stringify({ urgency })
+      });
+      await refreshData();
+      addToast(`Request ${result.request.token} priority updated to ${result.request.urgency}.`, 'success');
+      return result.request;
+    } catch (error) {
+      addToast(error.message || 'Could not update request priority.', 'error');
+      return null;
+    }
+  };
+
   const completeBloodRequest = async (requestId) => {
     try {
       const result = await api(`/requests/${encodeURIComponent(requestId)}/complete`, { method: 'POST' });
@@ -328,7 +354,7 @@ export function AppProvider({ children }) {
     setCurrentView, setAuthModal, setAuthInitialRole, setGeneratedCredentialsModal,
     login, logout, registerHospital, registerBloodBank, registerDonor,
     approveAccount, rejectAccount, blockAccount, reactivateAccount,
-    createBloodRequest, respondToRequest, completeBloodRequest, cancelBloodRequest,
+    createBloodRequest, respondToRequest, updateBloodRequestPriority, completeBloodRequest, cancelBloodRequest,
     updateDonorAvailability, updateDonorProfile, addCoordinationNote,
     addToast, removeToast, logActivity, refreshData
   };
