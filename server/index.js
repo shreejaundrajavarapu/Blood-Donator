@@ -4,6 +4,7 @@ import dotenv from 'dotenv';
 import bcrypt from 'bcryptjs';
 import mongoose from 'mongoose';
 import { Resend } from 'resend';
+import webpush from 'web-push';
 
 dotenv.config();
 
@@ -11,6 +12,13 @@ const app = express();
 const PORT = Number(process.env.PORT || 4000);
 const MONGODB_URI = process.env.MONGODB_URI;
 const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:5173';
+const VAPID_PUBLIC_KEY = process.env.VAPID_PUBLIC_KEY || '';
+const VAPID_PRIVATE_KEY = process.env.VAPID_PRIVATE_KEY || '';
+const VAPID_SUBJECT = process.env.VAPID_SUBJECT || 'mailto:admin@bloodconnect.org';
+
+if (VAPID_PUBLIC_KEY && VAPID_PRIVATE_KEY) {
+  webpush.setVapidDetails(VAPID_SUBJECT, VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY);
+}
 
 const REQUEST_PRIORITIES = ['Emergency', 'Critical', 'Normal'];
 const REQUEST_PRIORITY_RANK = Object.freeze({ Emergency: 0, Critical: 1, Normal: 2 });
@@ -54,6 +62,7 @@ const userSchema = new mongoose.Schema({
   licenseNumber: String,
   status: { type: String, default: 'Pending Verification' },
   rejectionReason: String,
+  pushSubscriptions: { type: [mongoose.Schema.Types.Mixed], default: [] },
   createdAt: { type: String, required: true }
 }, { timestamps: true });
 
@@ -88,6 +97,7 @@ const responseSchema = new mongoose.Schema({
   donorLocation: String,
   donorPhone: String,
   donorEmail: String,
+  donorSelectedPriority: { type: String, enum: REQUEST_PRIORITIES, default: 'Normal' },
   status: String,
   responseTime: String
 }, { timestamps: true });
@@ -112,6 +122,7 @@ function publicUser(user) {
   const obj = user.toObject ? user.toObject() : { ...user };
   delete obj.passwordHash;
   delete obj.__v;
+  delete obj.pushSubscriptions;
   return obj;
 }
 
@@ -126,6 +137,91 @@ async function logActivity(activity, userOrOrg, role, status = 'Info') {
     time: now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
     status
   });
+}
+
+function notificationsConfigured() {
+  return Boolean(VAPID_PUBLIC_KEY && VAPID_PRIVATE_KEY);
+}
+
+function matchingDonorQuery(bloodGroup, hospitalLocation) {
+  const escapeRegex = (value) => String(value || '').trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return {
+    role: 'donor',
+    status: 'Approved',
+    availability: 'Available',
+    bloodGroup: new RegExp(`^${escapeRegex(bloodGroup)}$`, 'i'),
+    location: new RegExp(`^${escapeRegex(hospitalLocation)}$`, 'i')
+  };
+}
+
+async function getMatchingRegisteredDonors(bloodGroup, hospitalLocation) {
+  // Notifications are independent of login state, availability, and donation cooldown.
+  // Any donor who is registered and has a matching blood group/location can be notified
+  // as long as they have previously granted Chrome push permission on that device.
+  const query = {
+    role: 'donor',
+    bloodGroup: new RegExp(`^${String(bloodGroup || '').trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i'),
+    location: new RegExp(`^${String(hospitalLocation || '').trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i'),
+    pushSubscriptions: { $exists: true, $ne: [] }
+  };
+  return User.find(query).lean();
+}
+
+async function removePushSubscription(endpoint) {
+  if (!endpoint) return;
+  await User.updateMany(
+    { 'pushSubscriptions.endpoint': endpoint },
+    { $pull: { pushSubscriptions: { endpoint } } }
+  );
+}
+
+async function sendPushToDonors(donors, request, eventType = 'new-request') {
+  if (!notificationsConfigured()) {
+    return { configured: false, sent: 0, failed: 0 };
+  }
+
+  const notification = JSON.stringify({
+    title: `${request.urgency} Blood Request`,
+    body: `${request.bloodGroup} blood needed in ${request.hospitalLocation}. Token ${request.token}.`,
+    url: `${FRONTEND_URL}/`,
+    requestId: request.id,
+    token: request.token,
+    urgency: request.urgency,
+    eventType,
+    tag: `bloodconnect-${request.id}`
+  });
+
+  let sent = 0;
+  let failed = 0;
+  for (const donor of donors) {
+    for (const subscription of donor.pushSubscriptions || []) {
+      try {
+        await webpush.sendNotification(subscription, notification);
+        sent += 1;
+      } catch (error) {
+        failed += 1;
+        if (error?.statusCode === 404 || error?.statusCode === 410) {
+          await removePushSubscription(subscription?.endpoint);
+        } else {
+          console.error(`[Push] ${donor.id}:`, error?.message || error);
+        }
+      }
+    }
+  }
+
+  return { configured: true, sent, failed };
+}
+
+async function notifyMatchingDonors(request, eventType = 'new-request') {
+  try {
+    const donors = await getMatchingRegisteredDonors(request.bloodGroup, request.hospitalLocation);
+    const result = await sendPushToDonors(donors, request, eventType);
+    console.log(`🔔 Donor push: ${result.sent} sent, ${result.failed} failed for ${request.token}`);
+    return { donorCount: donors.length, ...result };
+  } catch (error) {
+    console.error('[Push] Could not notify matching donors:', error);
+    return { donorCount: 0, configured: notificationsConfigured(), sent: 0, failed: 1 };
+  }
 }
 
 async function nextUserId(role) {
@@ -193,6 +289,44 @@ function generatedPassword(role) {
   const prefix = role === 'hospital' ? 'hosp' : role === 'bloodbank' ? 'bb' : 'donor';
   return `${prefix}_${Math.floor(100 + Math.random() * 900)}`;
 }
+
+// ---------- Browser push notifications ----------
+app.get('/api/notifications/vapid-public-key', (req, res) => {
+  if (!VAPID_PUBLIC_KEY) {
+    return res.status(503).json({ error: 'Browser notifications are not configured on the server.' });
+  }
+  res.json({ publicKey: VAPID_PUBLIC_KEY });
+});
+
+app.post('/api/notifications/subscribe', async (req, res) => {
+  try {
+    if (!notificationsConfigured()) {
+      return res.status(503).json({ error: 'Browser notifications are not configured on the server.' });
+    }
+
+    const { userId, subscription } = req.body || {};
+    if (!userId || !subscription?.endpoint || !subscription?.keys?.p256dh || !subscription?.keys?.auth) {
+      return res.status(400).json({ error: 'A valid donor and push subscription are required.' });
+    }
+
+    const donor = await User.findOne({ id: userId, role: 'donor' });
+    if (!donor) return res.status(404).json({ error: 'Donor account not found.' });
+
+    // A browser subscription belongs to the donor currently using this browser profile.
+    await removePushSubscription(subscription.endpoint);
+    donor.pushSubscriptions.push({
+      endpoint: subscription.endpoint,
+      keys: subscription.keys,
+      createdAt: new Date().toISOString()
+    });
+    await donor.save();
+
+    res.json({ success: true });
+  } catch (error) {
+    console.error('[Push subscribe]', error);
+    res.status(500).json({ error: 'Could not save notification subscription.' });
+  }
+});
 
 // ---------- Health / initial data ----------
 app.get('/api/health', (req, res) => {
@@ -401,13 +535,8 @@ app.post('/api/requests', async (req, res) => {
       return res.status(400).json({ error: 'Priority must be Emergency, Critical, or Normal.' });
     }
 
-    const matchingDonors = await User.find({
-      role: 'donor', status: 'Approved', availability: 'Available',
-      bloodGroup: new RegExp(`^${String(bloodGroup).trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i'),
-      location: new RegExp(`^${String(hospitalLocation).trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i')
-    }).lean();
     const requestCreatedAt = new Date();
-    const eligibleMatchingDonors = matchingDonors.filter((donor) => isDonorEligible(donor, requestCreatedAt));
+    const eligibleMatchingDonors = await getEligibleMatchingDonors(bloodGroup, hospitalLocation, requestCreatedAt);
 
     const newRequest = await BloodRequest.create({
       id: `REQ-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
@@ -434,6 +563,7 @@ app.post('/api/requests', async (req, res) => {
       `Blood Request Token generated: ${token} (${newRequest.bloodGroup} at ${newRequest.hospitalLocation})`,
       newRequest.hospitalName, 'Hospital', newRequest.urgency
     );
+    await notifyMatchingDonors(newRequest, 'new-request');
     res.status(201).json({ success: true, request: newRequest, matchingDonorsCount: eligibleMatchingDonors.length });
   } catch (error) {
     console.error(error);
@@ -455,6 +585,63 @@ async function updateRequestStatus(req, res, status) {
     res.status(500).json({ error: 'Could not update blood request.' });
   }
 }
+
+function isOpenRequestStatus(status) {
+  return status === 'Pending' || status === 'Accepted';
+}
+
+async function validateDonorPriorityOrder(donor, request) {
+  // A donor may work on only one active accepted request at a time.
+  const acceptedResponses = await Response.find({
+    donorId: donor.id,
+    status: 'Accepted',
+    requestId: { $ne: request.id }
+  }).lean();
+
+  if (acceptedResponses.length > 0) {
+    const activeRequestIds = acceptedResponses.map((response) => response.requestId);
+    const activeRequests = await BloodRequest.find({
+      id: { $in: activeRequestIds },
+      status: { $in: ['Pending', 'Accepted'] }
+    }).lean();
+
+    if (activeRequests.length > 0) {
+      const active = activeRequests[0];
+      throw Object.assign(
+        new Error(`You already accepted request ${active.token}. Please complete that request before accepting another blood request.`),
+        { statusCode: 409, code: 'DONOR_ALREADY_ASSIGNED' }
+      );
+    }
+  }
+
+  const donorResponses = await Response.find({ donorId: donor.id }).lean();
+  const declinedRequestIds = new Set(
+    donorResponses.filter((response) => response.status === 'Declined').map((response) => response.requestId)
+  );
+
+  const higherPriorityRequests = await BloodRequest.find({
+    id: { $ne: request.id },
+    status: { $in: ['Pending', 'Accepted'] },
+    bloodGroup: new RegExp(`^${String(donor.bloodGroup || '').trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i'),
+    hospitalLocation: new RegExp(`^${String(donor.location || '').trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i')
+  }).lean();
+
+  const higher = higherPriorityRequests
+    .filter((candidate) => !declinedRequestIds.has(candidate.id))
+    .map((candidate) => ({
+      ...candidate,
+      normalizedPriority: sanitizeRequestPriority(candidate.urgency)
+    }))
+    .filter((candidate) => REQUEST_PRIORITY_RANK[candidate.normalizedPriority] < REQUEST_PRIORITY_RANK[sanitizeRequestPriority(request.urgency)])
+    .sort((a, b) => REQUEST_PRIORITY_RANK[a.normalizedPriority] - REQUEST_PRIORITY_RANK[b.normalizedPriority])[0];
+
+  if (higher) {
+    throw Object.assign(
+      new Error(`A higher-priority ${higher.normalizedPriority} blood request (${higher.token}) is currently active. Please respond to the higher-priority request first.`),
+      { statusCode: 409, code: 'HIGHER_PRIORITY_REQUEST_ACTIVE', higherPriority: higher.normalizedPriority, higherRequestToken: higher.token }
+    );
+  }
+}
 app.patch('/api/requests/:requestId/priority', async (req, res) => {
   try {
     const urgency = normalizeRequestPriority(req.body?.urgency);
@@ -468,6 +655,7 @@ app.patch('/api/requests/:requestId/priority', async (req, res) => {
     request.urgency = urgency;
     await request.save();
     await logActivity(`Request ${request.token} priority changed to ${urgency}`, request.hospitalName, 'Hospital', urgency);
+    await notifyMatchingDonors(request, 'priority-updated');
     res.json({ success: true, request });
   } catch (error) {
     console.error(error);
@@ -480,7 +668,7 @@ app.post('/api/requests/:requestId/cancel', (req, res) => updateRequestStatus(re
 // ---------- Donor responses ----------
 app.post('/api/responses', async (req, res) => {
   try {
-    const { requestId, donorId, responseStatus } = req.body;
+    const { requestId, donorId, responseStatus, donorSelectedPriority } = req.body;
     const [request, donor] = await Promise.all([
       BloodRequest.findOne({ id: requestId }),
       User.findOne({ id: donorId })
@@ -497,6 +685,24 @@ app.post('/api/responses', async (req, res) => {
       });
     }
 
+    if (responseStatus === 'Accepted') {
+      try {
+        await validateDonorPriorityOrder(donor, request);
+      } catch (priorityError) {
+        if (priorityError?.statusCode === 409) {
+          return res.status(409).json({
+            success: false,
+            error: priorityError.message,
+            code: priorityError.code,
+            higherPriority: priorityError.higherPriority,
+            higherRequestToken: priorityError.higherRequestToken
+          });
+        }
+        throw priorityError;
+      }
+    }
+
+    const selectedPriority = sanitizeRequestPriority(donorSelectedPriority || request.urgency);
     const now = new Date();
     const responseTime = `${now.toISOString().split('T')[0]} ${now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;
     const existing = await Response.findOne({ requestId, donorId });
@@ -510,6 +716,7 @@ app.post('/api/responses', async (req, res) => {
       donorLocation: donor.location,
       donorPhone: donor.phone,
       donorEmail: donor.email || '',
+      donorSelectedPriority: selectedPriority,
       status: responseStatus,
       responseTime
     };

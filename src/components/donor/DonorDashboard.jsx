@@ -18,7 +18,8 @@ import {
   X,
   Sparkles,
   Info,
-  ChevronRight
+  ChevronRight,
+  Bell
 } from 'lucide-react';
 
 export default function DonorDashboard() {
@@ -30,10 +31,14 @@ export default function DonorDashboard() {
     updateDonorAvailability,
     updateDonorProfile,
     logout,
-    addToast
+    addToast,
+    enableNotifications,
+    notificationsEnabled
   } = useApp();
 
   const [activeTab, setActiveTab] = useState('dashboard'); // 'dashboard' | 'requests' | 'responses' | 'profile' | 'availability'
+  const [responsePrioritySelections, setResponsePrioritySelections] = useState({});
+  const [priorityWarning, setPriorityWarning] = useState(null);
 
   // Editable profile state
   const [profileForm, setProfileForm] = useState({
@@ -77,6 +82,66 @@ export default function DonorDashboard() {
   // Check if donor has already responded to a request
   const getDonorResponseForRequest = (requestId) => {
     return myResponses.find((res) => res.requestId === requestId);
+  };
+
+  const getSelectedResponsePriority = (request) => (
+    responsePrioritySelections[request.id] || normalizePriority(request.urgency)
+  );
+
+  const handleResponsePriorityChange = (requestId, priority) => {
+    setResponsePrioritySelections((prev) => ({ ...prev, [requestId]: priority }));
+  };
+
+  const handleAcceptRequest = (request) => {
+    const selectedPriority = getSelectedResponsePriority(request);
+    const requestPriority = normalizePriority(request.urgency);
+    const requestRank = PRIORITY_RANK[requestPriority];
+    const selectedRank = PRIORITY_RANK[selectedPriority];
+
+    // Never allow a donor to open multiple active accepted requests at once.
+    const hasActiveAcceptedRequest = acceptedResponses.some((response) => {
+      if (response.requestId === request.id) return false;
+      const relatedRequest = requests.find((item) => item.id === response.requestId);
+      return relatedRequest && relatedRequest.status !== 'Completed' && relatedRequest.status !== 'Cancelled';
+    });
+
+    if (hasActiveAcceptedRequest) {
+      addToast('You already accepted an active blood request. Please complete it before accepting another request.', 'warning', 7000);
+      return;
+    }
+
+    const activeHigherPriorityRequest = matchingRequests.find((candidate) => {
+      if (candidate.id === request.id) return false;
+      const candidatePriority = normalizePriority(candidate.urgency);
+      const candidateRank = PRIORITY_RANK[candidatePriority];
+      const donorResponse = getDonorResponseForRequest(candidate.id);
+      const alreadyDeclined = donorResponse?.status === 'Declined';
+      const isOpen = candidate.status !== 'Completed' && candidate.status !== 'Cancelled';
+      return isOpen && !alreadyDeclined && candidateRank < requestRank;
+    });
+
+    if (activeHigherPriorityRequest) {
+      addToast(
+        `A higher-priority ${normalizePriority(activeHigherPriorityRequest.urgency)} request (${activeHigherPriorityRequest.token}) is active. Please respond to the higher-priority request first.`,
+        'warning',
+        7000
+      );
+      return;
+    }
+
+    if (selectedRank > requestRank) {
+      setPriorityWarning({ request, selectedPriority, requestPriority });
+      return;
+    }
+
+    respondToRequest(request.id, currentUser.id, 'Accepted', selectedPriority);
+  };
+
+  const confirmPriorityWarning = () => {
+    if (!priorityWarning) return;
+    const { request, selectedPriority } = priorityWarning;
+    setPriorityWarning(null);
+    respondToRequest(request.id, currentUser.id, 'Accepted', selectedPriority);
   };
 
   const handleProfileSave = (e) => {
@@ -497,13 +562,35 @@ export default function DonorDashboard() {
                                     justifyContent: 'flex-end',
                                     gap: '12px',
                                     borderTop: '1px solid var(--border-light)',
-                                    paddingTop: '16px'
+                                    paddingTop: '16px',
+                                    flexWrap: 'wrap'
                                   }}
                                 >
+                                  <label style={{ display: 'flex', alignItems: 'center', gap: '7px', fontSize: '0.78rem', color: '#64748b', fontWeight: 600 }}>
+                                    Priority:
+                                    <select
+                                      aria-label={`Response priority for ${req.token}`}
+                                      value={getSelectedResponsePriority(req)}
+                                      onChange={(e) => handleResponsePriorityChange(req.id, e.target.value)}
+                                      style={{
+                                        border: '1px solid var(--border-light)',
+                                        borderRadius: '8px',
+                                        padding: '7px 28px 7px 10px',
+                                        background: '#fff',
+                                        fontWeight: 700,
+                                        color: '#334155'
+                                      }}
+                                    >
+                                      <option value="Emergency">Emergency</option>
+                                      <option value="Critical">Critical</option>
+                                      <option value="Normal">Normal</option>
+                                    </select>
+                                  </label>
+
                                   <button
                                     className="btn btn-outline btn-sm"
                                     style={{ color: '#ef4444' }}
-                                    onClick={() => respondToRequest(req.id, currentUser.id, 'Declined')}
+                                    onClick={() => respondToRequest(req.id, currentUser.id, 'Declined', getSelectedResponsePriority(req))}
                                   >
                                     <X size={14} />
                                     <span>Decline Request</span>
@@ -511,7 +598,7 @@ export default function DonorDashboard() {
 
                                   <button
                                     className="btn btn-primary btn-sm"
-                                    onClick={() => respondToRequest(req.id, currentUser.id, 'Accepted')}
+                                    onClick={() => handleAcceptRequest(req)}
                                   >
                                     <Check size={14} />
                                     <span>ACCEPT REQUEST</span>
@@ -620,18 +707,38 @@ export default function DonorDashboard() {
                                 <span style={{ fontSize: '0.75rem', color: '#64748b' }}>{donorRes.responseTime}</span>
                               </div>
                             ) : (
-                              <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '12px', borderTop: '1px solid #e2e8f0', paddingTop: '16px' }}>
+                              <div style={{ display: 'flex', justifyContent: 'flex-end', alignItems: 'center', gap: '12px', borderTop: '1px solid #e2e8f0', paddingTop: '16px', flexWrap: 'wrap' }}>
+                                <label style={{ display: 'flex', alignItems: 'center', gap: '7px', fontSize: '0.78rem', color: '#64748b', fontWeight: 600 }}>
+                                  Priority:
+                                  <select
+                                    aria-label={`Response priority for ${req.token}`}
+                                    value={getSelectedResponsePriority(req)}
+                                    onChange={(e) => handleResponsePriorityChange(req.id, e.target.value)}
+                                    style={{
+                                      border: '1px solid var(--border-light)',
+                                      borderRadius: '8px',
+                                      padding: '7px 28px 7px 10px',
+                                      background: '#fff',
+                                      fontWeight: 700,
+                                      color: '#334155'
+                                    }}
+                                  >
+                                    <option value="Emergency">Emergency</option>
+                                    <option value="Critical">Critical</option>
+                                    <option value="Normal">Normal</option>
+                                  </select>
+                                </label>
                                 <button
                                   className="btn btn-outline btn-sm"
                                   style={{ color: '#ef4444' }}
-                                  onClick={() => respondToRequest(req.id, currentUser.id, 'Declined')}
+                                  onClick={() => respondToRequest(req.id, currentUser.id, 'Declined', getSelectedResponsePriority(req))}
                                 >
                                   <X size={14} />
                                   <span>Decline</span>
                                 </button>
                                 <button
                                   className="btn btn-primary btn-sm"
-                                  onClick={() => respondToRequest(req.id, currentUser.id, 'Accepted')}
+                                  onClick={() => handleAcceptRequest(req)}
                                 >
                                   <Check size={14} />
                                   <span>ACCEPT REQUEST</span>
@@ -781,6 +888,38 @@ export default function DonorDashboard() {
                 <h3 className="panel-title">Donation Availability Preferences</h3>
               </div>
               <div style={{ padding: '24px' }}>
+                <div
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    gap: '16px',
+                    padding: '14px 16px',
+                    marginBottom: '20px',
+                    border: '1px solid var(--border-light)',
+                    borderRadius: '12px',
+                    background: '#f8fafc'
+                  }}
+                >
+                  <div>
+                    <div style={{ fontWeight: 700, color: 'var(--text-main)' }}>
+                      Chrome Notifications
+                    </div>
+                    <div style={{ fontSize: '0.78rem', color: '#64748b', marginTop: '3px' }}>
+                      Get matching blood-request alerts even when you are logged out.
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    className="btn btn-primary btn-sm"
+                    onClick={enableNotifications}
+                    disabled={notificationsEnabled}
+                  >
+                    <Bell size={14} />
+                    <span>{notificationsEnabled ? 'Notifications Enabled' : 'Enable Notifications'}</span>
+                  </button>
+                </div>
+
                 <p style={{ fontSize: '0.875rem', color: '#64748b', marginBottom: '20px' }}>
                   Choose whether you are actively available to receive urgent requests from hospitals in{' '}
                   <strong>{currentUser?.location}</strong>.
@@ -828,6 +967,32 @@ export default function DonorDashboard() {
           )}
         </div>
       </main>
+
+      {priorityWarning && (
+        <div className="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="priority-warning-title">
+          <div className="modal-card" style={{ maxWidth: '500px' }}>
+            <div className="modal-header">
+              <div style={{ display: 'flex', alignItems: 'center', gap: '9px' }}>
+                <AlertTriangle size={22} color="#d97706" />
+                <h3 id="priority-warning-title" className="modal-title">Priority Warning</h3>
+              </div>
+            </div>
+            <div className="modal-body">
+              <p style={{ fontSize: '0.95rem', color: '#334155', lineHeight: 1.6, margin: 0 }}>
+                ⚠️ This is a <strong>{priorityWarning.requestPriority}</strong> blood request. You selected <strong>{priorityWarning.selectedPriority}</strong>. Are you sure you want to continue?
+              </p>
+            </div>
+            <div className="modal-footer">
+              <button type="button" className="btn btn-outline btn-sm" onClick={() => setPriorityWarning(null)}>
+                Go Back
+              </button>
+              <button type="button" className="btn btn-primary btn-sm" onClick={confirmPriorityWarning}>
+                Continue
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
