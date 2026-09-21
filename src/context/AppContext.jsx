@@ -3,6 +3,15 @@ import React, { createContext, useContext, useEffect, useState } from 'react';
 const AppContext = createContext();
 const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:4000/api';
 
+const PUSH_SERVICE_WORKER = '/sw.js';
+
+function urlBase64ToUint8Array(base64String) {
+  const padding = '='.repeat((4 - (base64String.length % 4)) % 4);
+  const base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');
+  const rawData = window.atob(base64);
+  return Uint8Array.from([...rawData].map((char) => char.charCodeAt(0)));
+}
+
 const INITIAL_USERS = [];
 const INITIAL_REQUESTS = [];
 const INITIAL_RESPONSES = [];
@@ -79,6 +88,7 @@ export function AppProvider({ children }) {
   const [generatedCredentialsModal, setGeneratedCredentialsModal] = useState(null);
   const [toasts, setToasts] = useState([]);
   const [dataLoaded, setDataLoaded] = useState(false);
+  const [notificationsEnabled, setNotificationsEnabled] = useState(false);
 
   const addToast = (message, type = 'success', duration = 4000) => {
     const id = Date.now() + Math.random().toString();
@@ -110,6 +120,14 @@ export function AppProvider({ children }) {
     refreshData();
   }, []);
 
+  // Prepare the service worker without prompting for notification permission.
+  useEffect(() => {
+    if (!('serviceWorker' in navigator)) return;
+    navigator.serviceWorker.register(PUSH_SERVICE_WORKER).catch((error) => {
+      console.warn('[BloodConnect] Push service worker registration failed:', error);
+    });
+  }, []);
+
   // Keep donor requests synchronized with changes made in other browser sessions.
   useEffect(() => {
     if (currentUser?.role !== 'donor') return undefined;
@@ -117,6 +135,33 @@ export function AppProvider({ children }) {
       refreshData({ silent: true });
     }, 5000);
     return () => clearInterval(intervalId);
+  }, [currentUser?.id, currentUser?.role]);
+
+  useEffect(() => {
+    if (currentUser?.role !== 'donor' || !('serviceWorker' in navigator) || !('PushManager' in window)) {
+      setNotificationsEnabled(false);
+      return undefined;
+    }
+
+    let cancelled = false;
+    (async () => {
+      try {
+        const registration = await navigator.serviceWorker.ready;
+        const subscription = await registration.pushManager.getSubscription();
+        const enabled = Boolean(subscription && window.Notification?.permission === 'granted');
+        if (!cancelled) setNotificationsEnabled(enabled);
+        if (subscription && window.Notification?.permission === 'granted') {
+          await api('/notifications/subscribe', {
+            method: 'POST',
+            body: JSON.stringify({ userId: currentUser.id, subscription })
+          });
+        }
+      } catch (error) {
+        console.warn('[BloodConnect] Existing push subscription could not be synced:', error);
+      }
+    })();
+
+    return () => { cancelled = true; };
   }, [currentUser?.id, currentUser?.role]);
 
   useEffect(() => {
@@ -155,6 +200,51 @@ export function AppProvider({ children }) {
       else if (p.status === 'blocked') addToast('This account has been deactivated or blocked by Admin.', 'error');
       else addToast(p.message || p.error || 'Login failed.', 'error');
       return { success: false, status: p.status, message: p.message || p.error || 'Login failed.' };
+    }
+  };
+
+  const enableNotifications = async () => {
+    try {
+      if (currentUser?.role !== 'donor') {
+        addToast('Browser notifications are available for donor accounts.', 'info');
+        return false;
+      }
+      if (!('Notification' in window) || !('serviceWorker' in navigator) || !('PushManager' in window)) {
+        addToast('This browser does not support push notifications.', 'warning', 6000);
+        return false;
+      }
+
+      const permission = window.Notification.permission === 'default'
+        ? await window.Notification.requestPermission()
+        : window.Notification.permission;
+
+      if (permission !== 'granted') {
+        addToast('Chrome notifications are blocked. Please allow notifications for BloodConnect in browser settings.', 'warning', 7000);
+        return false;
+      }
+
+      const keyPayload = await api('/notifications/vapid-public-key');
+      const registration = await navigator.serviceWorker.ready;
+      let subscription = await registration.pushManager.getSubscription();
+      if (!subscription) {
+        subscription = await registration.pushManager.subscribe({
+          userVisibleOnly: true,
+          applicationServerKey: urlBase64ToUint8Array(keyPayload.publicKey)
+        });
+      }
+
+      await api('/notifications/subscribe', {
+        method: 'POST',
+        body: JSON.stringify({ userId: currentUser.id, subscription })
+      });
+
+      setNotificationsEnabled(true);
+      addToast('Chrome notifications enabled. You can now receive matching blood-request alerts even after logging out.', 'success', 7000);
+      return true;
+    } catch (error) {
+      console.error('[BloodConnect] Enable notifications failed:', error);
+      addToast(error.message || 'Could not enable Chrome notifications.', 'error', 7000);
+      return false;
     }
   };
 
@@ -203,9 +293,8 @@ export function AppProvider({ children }) {
     try {
       const result = await api(`/admin/users/${encodeURIComponent(userId)}/approve`, { method: 'POST' });
       await refreshData();
-      const emailResult = await sendApprovalEmail(result.credentials);
-      if (emailResult.success) addToast(`${result.user.name} approved successfully! Login credentials emailed.`, 'success');
-      else addToast(`${result.user.name} approved successfully, but the email could not be sent: ${emailResult.error}`, 'warning', 8000);
+      await sendApprovalEmail(result.credentials);
+addToast(`${result.user.name} approved successfully!`, 'success');
       setGeneratedCredentialsModal({ ...result.credentials });
       return result.user;
     } catch (error) {
@@ -259,7 +348,7 @@ export function AppProvider({ children }) {
     } catch (error) { addToast(error.message, 'error'); return null; }
   };
 
-  const respondToRequest = async (requestId, donorId, responseStatus) => {
+  const respondToRequest = async (requestId, donorId, responseStatus, donorSelectedPriority = null) => {
     // Eligibility is checked only when a donor accepts a request, never during registration.
     if (responseStatus === 'Accepted') {
       const donor = users.find((u) => u.id === donorId);
@@ -277,7 +366,8 @@ export function AppProvider({ children }) {
 
     try {
       const result = await api('/responses', {
-        method: 'POST', body: JSON.stringify({ requestId, donorId, responseStatus })
+        method: 'POST',
+        body: JSON.stringify({ requestId, donorId, responseStatus, donorSelectedPriority })
       });
       await refreshData();
       if (responseStatus === 'Accepted') addToast(`Request ${result.response.requestToken} accepted! Hospital contact details revealed.`, 'success', 6000);
@@ -350,13 +440,13 @@ export function AppProvider({ children }) {
 
   const value = {
     users, requests, responses, activities, currentUser, currentView, authModal,
-    authInitialRole, generatedCredentialsModal, toasts, dataLoaded,
+    authInitialRole, generatedCredentialsModal, toasts, dataLoaded, notificationsEnabled,
     setCurrentView, setAuthModal, setAuthInitialRole, setGeneratedCredentialsModal,
     login, logout, registerHospital, registerBloodBank, registerDonor,
     approveAccount, rejectAccount, blockAccount, reactivateAccount,
     createBloodRequest, respondToRequest, updateBloodRequestPriority, completeBloodRequest, cancelBloodRequest,
     updateDonorAvailability, updateDonorProfile, addCoordinationNote,
-    addToast, removeToast, logActivity, refreshData
+    addToast, removeToast, logActivity, refreshData, enableNotifications
   };
 
   return <AppContext.Provider value={value}>{children}</AppContext.Provider>;
