@@ -641,6 +641,36 @@ async function validateDonorPriorityOrder(donor, request) {
       { statusCode: 409, code: 'HIGHER_PRIORITY_REQUEST_ACTIVE', higherPriority: higher.normalizedPriority, higherRequestToken: higher.token }
     );
   }
+  const requestPriority = sanitizeRequestPriority(request.urgency);
+
+if (requestPriority === 'Emergency') {
+  const requestCreatedAt = new Date(request.createdAt || 0).getTime();
+
+  const earlierEmergency = higherPriorityRequests
+    .filter((candidate) =>
+      sanitizeRequestPriority(candidate.urgency) === 'Emergency' &&
+      new Date(candidate.createdAt || 0).getTime() < requestCreatedAt
+    )
+    .sort(
+      (a, b) =>
+        new Date(a.createdAt || 0).getTime() -
+        new Date(b.createdAt || 0).getTime()
+    )[0];
+
+  if (earlierEmergency) {
+    throw Object.assign(
+      new Error(
+        `An earlier Emergency blood request (${earlierEmergency.token}) is still active. Please respond to the first Emergency request first.`
+      ),
+      {
+        statusCode: 409,
+        code: 'EARLIER_EMERGENCY_REQUEST_ACTIVE',
+        higherPriority: 'Emergency',
+        higherRequestToken: earlierEmergency.token
+      }
+    );
+  }
+}
 }
 app.patch('/api/requests/:requestId/priority', async (req, res) => {
   try {
