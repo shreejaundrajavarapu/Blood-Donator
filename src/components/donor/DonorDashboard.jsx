@@ -71,7 +71,12 @@ export default function DonorDashboard() {
             const priorityA = PRIORITY_RANK[normalizePriority(a.urgency)];
             const priorityB = PRIORITY_RANK[normalizePriority(b.urgency)];
             if (priorityA !== priorityB) return priorityA - priorityB;
-            return new Date(b.createdAt || 0) - new Date(a.createdAt || 0);
+
+if (normalizePriority(a.urgency) === 'Emergency') {
+  return new Date(a.createdAt || 0) - new Date(b.createdAt || 0);
+}
+
+return new Date(b.createdAt || 0) - new Date(a.createdAt || 0);
           })
       : [];
 
